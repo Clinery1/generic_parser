@@ -5,19 +5,20 @@ use std::{
         DerefMut,
     },
     fmt::Display,
+    marker::PhantomData,
 };
-use error::*;
+pub use error::*;
 
 
 mod error;
 
 
-pub struct GenericSubParser<'source,'borrow> {
-    parent:&'borrow mut GenericParser<'source>,
+pub struct GenericSubParser<'source,'borrow,Kind:Display+EOFError> {
+    parent:&'borrow mut GenericParser<'source,Kind>,
     error:bool,
 }
-impl<'source,'borrow> GenericSubParser<'source,'borrow> {
-    pub fn new(parent:&'borrow mut GenericParser<'source>)->Self {
+impl<'source,'borrow,Kind:Display+EOFError> GenericSubParser<'source,'borrow,Kind> {
+    pub fn new(parent:&'borrow mut GenericParser<'source,Kind>)->Self {
         parent.stack.push(parent.index);
         Self {
             parent,
@@ -29,18 +30,18 @@ impl<'source,'borrow> GenericSubParser<'source,'borrow> {
     /// Restores the old index.
     pub fn finish_error(mut self) {self.error=true}
 }
-impl<'source,'borrow> Deref for GenericSubParser<'source,'borrow> {
-    type Target=GenericParser<'source>;
+impl<'source,'borrow,Kind:Display+EOFError> Deref for GenericSubParser<'source,'borrow,Kind> {
+    type Target=GenericParser<'source,Kind>;
     fn deref(&self)->&Self::Target {
         self.parent
     }
 }
-impl<'source,'borrow> DerefMut for GenericSubParser<'source,'borrow> {
+impl<'source,'borrow,Kind:Display+EOFError> DerefMut for GenericSubParser<'source,'borrow,Kind> {
     fn deref_mut(&mut self)->&mut Self::Target {
         self.parent
     }
 }
-impl<'source,'borrow> Drop for GenericSubParser<'source,'borrow> {
+impl<'source,'borrow,Kind:Display+EOFError> Drop for GenericSubParser<'source,'borrow,Kind> {
     fn drop(&mut self) {
         if self.error { // Reset the index
             self.parent.index=self.parent.stack.pop().unwrap_or(self.parent.index);
@@ -50,22 +51,24 @@ impl<'source,'borrow> Drop for GenericSubParser<'source,'borrow> {
     }
 }
 #[derive(Debug,Clone)]
-pub struct GenericParser<'source> {
+pub struct GenericParser<'source,Kind:Display+EOFError> {
     source:&'source str,
     stack:Vec<usize>,
     index:usize,
     filename:&'source str,
+    _phantom:PhantomData<Kind>,
 }
-impl<'source> GenericParser<'source> {
+impl<'source,Kind:Display+EOFError> GenericParser<'source,Kind> {
     pub fn new(source:&'source str,filename:&'source str)->Self {
         Self {
             source,
             stack:Vec::new(),
             index:0,
             filename,
+            _phantom:PhantomData,
         }
     }
-    pub fn create_error_with_suberrors<Kind:Display+EOFErrorKind>(&self,kind:Kind,important:bool,suberrors:Vec<Error<'source,Kind>>)->Error<'source,Kind> {
+    pub fn create_error_with_suberrors(&self,kind:Kind,important:bool,suberrors:Vec<Error<'source,Kind>>)->Error<'source,Kind> {
         Error{
             line:self.get_line_range(),
             column:self.get_column_range(),
@@ -75,7 +78,7 @@ impl<'source> GenericParser<'source> {
             important,
         }
     }
-    pub fn create_error<Kind:Display+EOFErrorKind>(&self,kind:Kind,important:bool)->Error<'source,Kind> {
+    pub fn create_error(&self,kind:Kind,important:bool)->Error<'source,Kind> {
         Error{
             line:self.get_line_range(),
             column:self.get_column_range(),
@@ -85,12 +88,23 @@ impl<'source> GenericParser<'source> {
             important,
         }
     }
-    #[inline]#[must_use]pub fn subparser<'borrow>(&'borrow mut self)->GenericSubParser<'source,'borrow> {GenericSubParser::new(self)}
-    #[inline]pub fn eof_error<Kind:Display+EOFErrorKind>(&self)->Error<'source,Kind> {self.create_error(Kind::create_eof(),true)}
+    #[inline]#[must_use]pub fn subparser<'borrow>(&'borrow mut self)->GenericSubParser<'source,'borrow,Kind> {GenericSubParser::new(self)}
+    #[inline]pub fn eof_error(&self)->Error<'source,Kind> {self.create_error(Kind::create_eof(),true)}
     #[inline]pub fn is_eof(&self)->bool {self.source[self.index..].len()==0}
     #[inline]pub fn filename(&self)->&'source str {self.filename}
     #[inline]pub fn level(&self)->usize {self.stack.len()}
     #[inline]pub fn source_left(&self)->&str {&self.source[self.index..]}
+    #[inline]pub fn get_source(&self)->&str {&self.source}
+    pub fn eat(&mut self,count:usize)->Result<&'source str,Error<'source,Kind>> {
+        let start=self.index;
+        for _ in 0..count {
+            if self.is_eof() {
+                return Err(self.eof_error());
+            }
+            self.set_next_char_boundary();
+        }
+        return Ok(&self.source[start..self.index]);
+    }
     pub fn get_line_range(&self)->Range<usize> {
         let l=self.get_line();
         return l..l;
@@ -112,7 +126,7 @@ impl<'source> GenericParser<'source> {
         let column=last.map(|s|s.chars().count()).unwrap_or(1).saturating_sub(1);
         return column;
     }
-    pub fn test<Kind:Display+EOFErrorKind>(&self,s:&str)->Result<bool,Error<'source,Kind>> {
+    pub fn test(&self,s:&str)->Result<bool,Error<'source,Kind>> {
         if self.is_eof() {
             return Err(self.eof_error());
         }
@@ -121,7 +135,7 @@ impl<'source> GenericParser<'source> {
         }
         return Ok(false);
     }
-    pub fn test_any<Kind:Display+EOFErrorKind>(&self,options:&[&str])->Result<bool,Error<'source,Kind>> {
+    pub fn test_any(&self,options:&[&str])->Result<bool,Error<'source,Kind>> {
         for option in options {
             if self.test(option)? {
                 return Ok(true);
@@ -129,14 +143,14 @@ impl<'source> GenericParser<'source> {
         }
         return Ok(false);
     }
-    pub fn then<Kind:Display+EOFErrorKind>(&mut self,s:&str)->Result<bool,Error<'source,Kind>> {
+    pub fn then(&mut self,s:&str)->Result<bool,Error<'source,Kind>> {
         if self.test(s)? {
             self.index+=s.len();
             return Ok(true);
         }
         return Ok(false);
     }
-    pub fn then_any<Kind:Display+EOFErrorKind>(&mut self,options:&[&str])->Result<bool,Error<'source,Kind>> {
+    pub fn then_any(&mut self,options:&[&str])->Result<bool,Error<'source,Kind>> {
         for option in options {
             if self.then(option)? {
                 return Ok(true);
@@ -144,15 +158,11 @@ impl<'source> GenericParser<'source> {
         }
         return Ok(false);
     }
-    pub fn skip<Kind:Display+EOFErrorKind>(&mut self,options:&[&str])->&mut Self {
-        'main:loop {
-            for option in options {
-                let res=self.then::<Kind>(option);
-                if let Ok(true)=res {
-                    continue 'main;
-                } else if res.is_err() {
-                    break 'main;
-                }
+    pub fn skip(&mut self,options:&[&str])->&mut Self {
+        loop {
+            match self.then_any(options) {
+                Ok(true)=>continue,
+                _=>{},
             }
             break;
         }
@@ -165,24 +175,22 @@ impl<'source> GenericParser<'source> {
     pub fn until(&mut self,ending:&str)->&'source str {
         let start=self.index;
         'main:loop {
-            self.set_next_char_boundary();
-            match self.test::<EOFError>(ending) {
+            match self.test(ending) {
                 Ok(true)|Err(_)=>break 'main,
                 _=>{},
             }
+            self.set_next_char_boundary();
         }
         return &self.source[start..self.index];
     }
     pub fn until_any(&mut self,endings:&[&str])->&'source str {
         let start=self.index;
-        'main:loop {
-            self.set_next_char_boundary();
-            for option in endings {
-                match self.test::<EOFError>(option) {
-                    Ok(true)|Err(_)=>break 'main,
-                    _=>{},
-                }
+        loop {
+            match self.test_any(endings) {
+                Ok(true)|Err(_)=>break,
+                _=>{},
             }
+            self.set_next_char_boundary();
         }
         return &self.source[start..self.index];
     }
@@ -190,12 +198,12 @@ impl<'source> GenericParser<'source> {
         let start=self.index;
         'main:loop {
             for option in exceptions {
-                if let Err(_)=self.then::<EOFError>(option) {
+                if let Err(_)=self.then(option) {
                     break 'main;
                 }
             }
             for option in endings {
-                let res=self.test::<EOFError>(option);
+                let res=self.test(option);
                 match res {
                     Ok(true)|Err(_)=>break 'main,
                     _=>{},
@@ -209,7 +217,7 @@ impl<'source> GenericParser<'source> {
         let start=self.index;
         'main:loop {
             for option in options {
-                match self.then::<EOFError>(option) {
+                match self.then(option) {
                     Ok(true)=>continue 'main,
                     Ok(false)=>{},
                     Err(_)=>break 'main,
@@ -219,7 +227,6 @@ impl<'source> GenericParser<'source> {
         }
         return &self.source[start..self.index];
     }
-    /*
     pub fn while_any_delimited(&mut self,options:&[&str],delimiters:&[&str])->&'source str {
         let start=self.index;
         let mut before_delimiter=self.index;
@@ -227,7 +234,7 @@ impl<'source> GenericParser<'source> {
         'delimiter:loop {
             let start2=self.index;
             for option in options {
-                match self.then::<EOFError>(option) {
+                match self.then(option) {
                     Ok(true)=>break,
                     Ok(false)=>{},
                     Err(_)=>break 'delimiter,
@@ -239,7 +246,7 @@ impl<'source> GenericParser<'source> {
             }
             before_delimiter=self.index;
             for delimiter in delimiters {
-                match self.then::<EOFError>(delimiter) {
+                match self.then(delimiter) {
                     Ok(true)=>{
                         has_delimiter=true;
                         continue 'delimiter;
@@ -254,7 +261,6 @@ impl<'source> GenericParser<'source> {
         }
         return &self.source[start..self.index];
     }
-    */
     pub fn while_any_delimited_counted(&mut self,options:&[&str],delimiters:&[&str],max_delimiters:usize)->&'source str {
         let start=self.index;
         let mut before_delimiter=self.index;
@@ -263,7 +269,7 @@ impl<'source> GenericParser<'source> {
         'delimiter:loop {
             let start2=self.index;
             for option in options {
-                match self.then::<EOFError>(option) {
+                match self.then(option) {
                     Ok(true)=>break,
                     Ok(false)=>{},
                     Err(_)=>break 'delimiter,
@@ -278,7 +284,7 @@ impl<'source> GenericParser<'source> {
             }
             before_delimiter=self.index;
             for delimiter in delimiters {
-                match self.then::<EOFError>(delimiter) {
+                match self.then(delimiter) {
                     Ok(true)=>{
                         count+=1;
                         has_delimiter=true;

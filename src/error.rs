@@ -9,22 +9,13 @@ use std::{
 };
 
 
-pub trait EOFErrorKind {
+pub trait EOFError {
     fn create_eof()->Self;
 }
 
 
-pub struct EOFError;
-impl Display for EOFError {
-    fn fmt(&self,f:&mut Formatter)->FmtResult {
-        write!(f,"Unexpected EOF")
-    }
-}
-impl EOFErrorKind for EOFError {
-    fn create_eof()->Self {EOFError}
-}
 #[derive(Debug)]
-pub struct Error<'source,Kind:Display+EOFErrorKind=EOFError> {
+pub struct Error<'source,Kind:Display+EOFError> {
     pub line:Range<usize>,
     pub column:Range<usize>,
     pub kind:Kind,
@@ -32,11 +23,14 @@ pub struct Error<'source,Kind:Display+EOFErrorKind=EOFError> {
     pub suberrors:Vec<Self>,
     pub important:bool,
 }
-impl<'source,Kind:Display+EOFErrorKind> Error<'source,Kind> {
+impl<'source,Kind:Display+EOFError> Error<'source,Kind> {
     pub fn print_with_context(&self,contents:&str,filter_important:bool) {
-        self.print_with_context_prefix(contents,"",filter_important);
+        self.generic_print_with_context_prefix(contents,"","Error",filter_important);
     }
-    pub fn print_with_context_prefix(&self,contents:&str,prefix:impl Display,filter_important:bool) {
+    pub fn warning_print_with_context(&self,contents:&str,filter_important:bool) {
+        self.generic_print_with_context_prefix(contents,"","Warning",filter_important);
+    }
+    pub fn generic_print_with_context_prefix(&self,contents:&str,prefix:impl Display,level_name:&str,filter_important:bool) {
         //dbg!(&self.line,&self.column);
         let code_lines_vec=contents.lines().enumerate().collect::<Vec<_>>();
         let code_lines=&code_lines_vec[self.line.start.saturating_sub(1).min(code_lines_vec.len().saturating_sub(2))..=(self.line.end-1).min(code_lines_vec.len()-1)];
@@ -44,7 +38,7 @@ impl<'source,Kind:Display+EOFErrorKind> Error<'source,Kind> {
         if filter_important {
             suberror_count=self.suberrors.iter().filter(|e|e.important).count();
         }
-        println!("{}Error: {}",prefix,self.kind);
+        println!("{}{}: {}",prefix,level_name,self.kind);
         println!("{}     ╭╴{}:{}:{}",prefix,self.filename,self.line.start,self.column.start+1);
         println!("{}     │",prefix);
         let mut to_remove=None;
@@ -110,14 +104,14 @@ impl<'source,Kind:Display+EOFErrorKind> Error<'source,Kind> {
                         if i>0 {
                             println!("{}├╴Or",prefix);
                         }
-                        error.print_with_context_prefix(contents,format!("{}│ ",prefix),filter_important);
+                        error.generic_print_with_context_prefix(contents,format!("{}│ ",prefix),level_name,filter_important);
                     }
                 } else {
                     for (i,error) in self.suberrors.iter().enumerate() {
                         if i>0 {
                             println!("{}├╴Or",prefix);
                         }
-                        error.print_with_context_prefix(contents,format!("{}│ ",prefix),filter_important);
+                        error.generic_print_with_context_prefix(contents,format!("{}│ ",prefix),level_name,filter_important);
                     }
                 }
                 println!("{}╰────╴",prefix);
@@ -125,7 +119,7 @@ impl<'source,Kind:Display+EOFErrorKind> Error<'source,Kind> {
         }
     }
 }
-impl<'source,Kind:Display+EOFErrorKind> Display for Error<'source,Kind> {
+impl<'source,Kind:Display+EOFError> Display for Error<'source,Kind> {
     fn fmt(&self,f:&mut Formatter)->FmtResult {
         write!(f,"Error `{}` at ({}:{}) {}",self.kind,self.line.start,self.column.start,self.kind)
     }
